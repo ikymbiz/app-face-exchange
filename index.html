@@ -1,0 +1,747 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>LiveFace AI</title>
+    <meta name="theme-color" content="#111827">
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+    <!-- MediaPipe Face Mesh for Real-time Face Tracking -->
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js" crossorigin="anonymous"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/face_mesh/face_mesh.js" crossorigin="anonymous"></script>
+    <style>
+        body {
+            -webkit-tap-highlight-color: transparent;
+            touch-action: pan-x pan-y;
+        }
+        .canvas-container {
+            position: relative;
+            width: 100%;
+            height: 100%;
+            overflow: hidden;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            background-color: #000;
+        }
+        canvas {
+            position: absolute;
+            max-width: 100%;
+            max-height: 100%;
+            object-fit: contain;
+            transform: scaleX(-1); /* ミラーリング */
+        }
+        /* Loading Spinner */
+        .loader {
+            border: 4px solid rgba(255,255,255,0.1);
+            border-left-color: #3b82f6;
+            border-radius: 50%;
+            width: 40px;
+            height: 40px;
+            animation: spin 1s linear infinite;
+        }
+        @keyframes spin { 0% { transform: rotate(0deg); } 100% { transform: rotate(360deg); } }
+        
+        /* 録画中のパルス効果 */
+        .recording-pulse {
+            animation: pulse-red 1.5s infinite;
+        }
+        @keyframes pulse-red {
+            0% { box-shadow: 0 0 0 0 rgba(239, 68, 68, 0.7); }
+            70% { box-shadow: 0 0 0 15px rgba(239, 68, 68, 0); }
+            100% { box-shadow: 0 0 0 0 rgba(239, 68, 68, 0); }
+        }
+
+        /* アニメーションとスクロール用 */
+        @keyframes slide-up {
+            from { transform: translateY(100%); }
+            to { transform: translateY(0); }
+        }
+        .animate-slide-up {
+            animation: slide-up 0.3s ease-out forwards;
+        }
+        #history-container::-webkit-scrollbar {
+            display: none;
+        }
+        #history-container {
+            -ms-overflow-style: none;
+            scrollbar-width: none;
+        }
+    </style>
+</head>
+<body class="bg-gray-900 text-white flex flex-col h-screen overflow-hidden selection:bg-blue-500 selection:text-white">
+
+    <!-- Header -->
+    <header class="flex justify-between items-center p-4 bg-gray-800 shadow-md z-10 shrink-0">
+        <div class="flex items-center gap-2">
+            <i class="fa-solid fa-wand-magic-sparkles text-blue-400 text-xl"></i>
+            <h1 class="text-xl font-bold bg-clip-text text-transparent bg-gradient-to-r from-blue-400 to-purple-500">LiveFace AI</h1>
+        </div>
+        <div class="flex items-center gap-3">
+            <span id="status-indicator" class="text-xs font-semibold px-2 py-1 rounded-full bg-yellow-500/20 text-yellow-400 border border-yellow-500/50">
+                <i class="fa-solid fa-spinner fa-spin mr-1"></i> 起動中
+            </span>
+            <!-- 設定ボタン追加 -->
+            <button id="btn-settings" class="text-gray-300 hover:text-white p-2 active:scale-95 transition-transform">
+                <i class="fa-solid fa-gear text-xl"></i>
+            </button>
+        </div>
+    </header>
+
+    <!-- Main View Area -->
+    <main class="flex-grow relative canvas-container" id="main-view">
+        <video id="video-input" class="hidden" playsinline autoplay muted></video>
+        <canvas id="output-canvas"></canvas>
+        
+        <!-- UI Overlay: Loading -->
+        <div id="loading-overlay" class="absolute inset-0 bg-gray-900/80 flex flex-col justify-center items-center z-20 backdrop-blur-sm">
+            <div class="loader mb-4"></div>
+            <p class="text-gray-300 font-medium tracking-wide animate-pulse">AIモデルを読み込み中...</p>
+        </div>
+        
+        <!-- UI Overlay: Rec Indicator -->
+        <div id="rec-indicator" class="absolute top-4 right-4 bg-red-500/20 text-red-500 border border-red-500/50 px-3 py-1 rounded-full text-sm font-bold flex items-center gap-2 hidden z-10 backdrop-blur-md">
+            <div class="w-2 h-2 bg-red-500 rounded-full recording-pulse"></div>
+            REC <span id="rec-time">00:00</span>
+        </div>
+    </main>
+
+    <!-- Controls Area (Mobile First Bottom Bar) -->
+    <footer class="bg-gray-800 p-4 pb-safe rounded-t-2xl shadow-[0_-4px_20px_rgba(0,0,0,0.3)] z-10 shrink-0">
+        <div class="flex justify-around items-center max-w-md mx-auto">
+            
+            <!-- Upload Image -->
+            <div class="flex flex-col items-center gap-1">
+                <label for="image-upload" class="w-12 h-12 rounded-full bg-gray-700 flex justify-center items-center text-gray-300 active:scale-95 transition-transform cursor-pointer hover:bg-gray-600">
+                    <i class="fa-solid fa-image text-xl"></i>
+                </label>
+                <span class="text-[10px] text-gray-400">顔画像</span>
+                <input type="file" id="image-upload" accept="image/*" class="hidden">
+            </div>
+
+            <!-- Capture Photo -->
+            <div class="flex flex-col items-center gap-1">
+                <button id="btn-capture" class="w-14 h-14 rounded-full bg-gray-700 flex justify-center items-center text-white active:scale-95 transition-transform hover:bg-gray-600 shadow-lg border border-gray-600">
+                    <i class="fa-solid fa-camera text-2xl"></i>
+                </button>
+                <span class="text-[10px] text-gray-400">写真</span>
+            </div>
+
+            <!-- Record Video (Main Action) -->
+            <div class="flex flex-col items-center gap-1">
+                <button id="btn-record" class="w-16 h-16 rounded-full bg-gradient-to-br from-red-500 to-red-600 flex justify-center items-center text-white active:scale-90 transition-all shadow-[0_0_15px_rgba(239,68,68,0.5)] border-4 border-gray-800">
+                    <i class="fa-solid fa-video text-2xl" id="record-icon"></i>
+                </button>
+                <span class="text-[10px] text-red-400 font-bold" id="record-text">録画</span>
+            </div>
+
+            <!-- Share -->
+            <div class="flex flex-col items-center gap-1">
+                <button id="btn-share" class="w-12 h-12 rounded-full bg-gray-700 flex justify-center items-center text-blue-400 active:scale-95 transition-transform hover:bg-gray-600">
+                    <i class="fa-solid fa-share-nodes text-xl"></i>
+                </button>
+                <span class="text-[10px] text-gray-400">共有</span>
+            </div>
+            
+            <!-- Reset -->
+            <div class="flex flex-col items-center gap-1">
+                <button id="btn-reset" class="w-12 h-12 rounded-full bg-gray-700 flex justify-center items-center text-gray-400 active:scale-95 transition-transform hover:bg-gray-600">
+                    <i class="fa-solid fa-rotate-left text-xl"></i>
+                </button>
+                <span class="text-[10px] text-gray-400">リセット</span>
+            </div>
+        </div>
+    </footer>
+
+    <!-- Settings & History Modal (追加) -->
+    <div id="settings-modal" class="fixed inset-0 bg-black/80 z-50 hidden flex-col justify-end sm:justify-center items-center backdrop-blur-sm transition-opacity">
+        <div class="bg-gray-800 w-full sm:w-11/12 max-w-md rounded-t-3xl sm:rounded-2xl p-6 shadow-2xl border-t border-gray-700 sm:border animate-slide-up sm:animate-none pb-safe">
+            <div class="flex justify-between items-center mb-6">
+                <h2 class="text-lg font-bold text-white"><i class="fa-solid fa-sliders text-blue-400 mr-2"></i>設定・履歴</h2>
+                <button id="btn-close-settings" class="text-gray-400 hover:text-white p-2 rounded-full hover:bg-gray-700 transition-colors"><i class="fa-solid fa-xmark text-xl"></i></button>
+            </div>
+            
+            <div class="space-y-6">
+                <!-- 簡易表情追従設定 -->
+                <div class="flex items-center justify-between">
+                    <div>
+                        <h3 class="text-sm font-medium text-gray-200">簡易表情追従</h3>
+                        <p class="text-[10px] text-gray-400 mt-1">口の動きに合わせて画像を動かします</p>
+                    </div>
+                    <label class="relative inline-flex items-center cursor-pointer">
+                        <input type="checkbox" id="setting-expression" class="sr-only peer">
+                        <div class="w-11 h-6 bg-gray-600 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-blue-500"></div>
+                    </label>
+                </div>
+
+                <!-- 顔の自動切り抜き設定 -->
+                <div class="flex items-center justify-between">
+                    <div>
+                        <h3 class="text-sm font-medium text-gray-200">顔の自動切り抜き</h3>
+                        <p class="text-[10px] text-gray-400 mt-1">アップロード時に背景をAIで自動除去します</p>
+                    </div>
+                    <label class="relative inline-flex items-center cursor-pointer">
+                        <input type="checkbox" id="setting-crop" class="sr-only peer">
+                        <div class="w-11 h-6 bg-gray-600 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-blue-500"></div>
+                    </label>
+                </div>
+
+                <!-- 履歴管理 (5世代バックアップ) -->
+                <div class="pt-4 border-t border-gray-700">
+                    <h3 class="text-sm font-medium text-gray-200 mb-2">顔画像履歴 (直近5件)</h3>
+                    <div class="flex gap-2 overflow-x-auto pb-2 snap-x" id="history-container">
+                        <!-- 履歴サムネイルがJSで挿入される -->
+                    </div>
+                </div>
+
+                <!-- データバックアップ (JSON形式インポート/エクスポート) -->
+                <div class="pt-4 border-t border-gray-700">
+                    <h3 class="text-sm font-medium text-gray-200 mb-2">データバックアップ</h3>
+                    <div class="flex gap-2">
+                        <button id="btn-export" class="flex-1 bg-gray-700 hover:bg-gray-600 text-white text-xs py-2 px-3 rounded-lg transition-colors border border-gray-600 shadow">
+                            <i class="fa-solid fa-download mr-1"></i> エクスポート
+                        </button>
+                        <label for="import-file" class="flex-1 bg-gray-700 hover:bg-gray-600 text-white text-xs py-2 px-3 rounded-lg transition-colors border border-gray-600 text-center cursor-pointer shadow">
+                            <i class="fa-solid fa-upload mr-1"></i> インポート
+                            <input type="file" id="import-file" accept=".json" class="hidden">
+                        </label>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Notification Toast -->
+    <div id="toast" class="fixed top-16 left-1/2 transform -translate-x-1/2 bg-gray-800/90 text-white px-4 py-2 rounded-full text-sm font-medium shadow-lg backdrop-blur-sm transition-opacity duration-300 opacity-0 pointer-events-none z-50">
+        Notification
+    </div>
+
+    <script>
+        /**
+         * LiveFace AI - Core Application Logic
+         * - IndexedDB for storage & history
+         * - Web Worker for async processing
+         * - Screen Wake Lock
+         * - MediaPipe FaceMesh (Tracking & Static Crop)
+         * - MediaRecorder & Canvas API
+         */
+
+        // --- 1. System Components (IndexedDB, Settings, Wake Lock, Worker, PWA) ---
+
+        const DB_NAME = 'LiveFaceAIDB';
+        const DB_VERSION = 1;
+        const STORE_NAME = 'settings';
+
+        class DBManager {
+            constructor() {
+                this.db = null;
+            }
+            async init() {
+                return new Promise((resolve, reject) => {
+                    const request = indexedDB.open(DB_NAME, DB_VERSION);
+                    request.onupgradeneeded = (e) => {
+                        const db = e.target.result;
+                        if (!db.objectStoreNames.contains(STORE_NAME)) {
+                            db.createObjectStore(STORE_NAME);
+                        }
+                    };
+                    request.onsuccess = (e) => {
+                        this.db = e.target.result;
+                        resolve();
+                    };
+                    request.onerror = (e) => reject(e.target.error);
+                });
+            }
+            async set(key, value) {
+                return new Promise((resolve, reject) => {
+                    try {
+                        const tx = this.db.transaction(STORE_NAME, 'readwrite');
+                        const store = tx.objectStore(STORE_NAME);
+                        const request = store.put(value, key);
+                        request.onsuccess = () => resolve();
+                        request.onerror = () => reject(request.error);
+                    } catch(e) { reject(e); }
+                });
+            }
+            async get(key) {
+                return new Promise((resolve, reject) => {
+                    try {
+                        const tx = this.db.transaction(STORE_NAME, 'readonly');
+                        const store = tx.objectStore(STORE_NAME);
+                        const request = store.get(key);
+                        request.onsuccess = () => resolve(request.result);
+                        request.onerror = () => reject(request.error);
+                    } catch(e) { reject(e); }
+                });
+            }
+        }
+        const db = new DBManager();
+
+        // App Settings & History State
+        let appSettings = { expressionTracking: true, autoCrop: true };
+        let faceHistory = []; // max 5
+
+        async function loadSettingsAndHistory() {
+            const savedSettings = await db.get('app_settings');
+            if (savedSettings) appSettings = { ...appSettings, ...savedSettings };
+            
+            document.getElementById('setting-expression').checked = appSettings.expressionTracking;
+            document.getElementById('setting-crop').checked = appSettings.autoCrop;
+
+            document.getElementById('setting-expression').addEventListener('change', async (e) => {
+                appSettings.expressionTracking = e.target.checked;
+                await db.set('app_settings', appSettings);
+            });
+            document.getElementById('setting-crop').addEventListener('change', async (e) => {
+                appSettings.autoCrop = e.target.checked;
+                await db.set('app_settings', appSettings);
+            });
+
+            const history = await db.get('face_history');
+            if (history && Array.isArray(history)) faceHistory = history;
+        }
+
+        function renderHistory() {
+            const container = document.getElementById('history-container');
+            container.innerHTML = '';
+            if (faceHistory.length === 0) {
+                container.innerHTML = '<p class="text-xs text-gray-500 my-4 mx-2">履歴がありません</p>';
+                return;
+            }
+            faceHistory.forEach((imgData) => {
+                const div = document.createElement('div');
+                div.className = 'w-14 h-14 shrink-0 rounded-full border-2 border-gray-600 overflow-hidden cursor-pointer active:scale-95 transition-transform snap-center relative';
+                if (imgData === overlayImage.src) div.classList.replace('border-gray-600', 'border-blue-500');
+                
+                const img = document.createElement('img');
+                img.src = imgData;
+                img.className = 'w-full h-full object-cover bg-black';
+                div.appendChild(img);
+                
+                div.addEventListener('click', async () => {
+                    overlayImage.src = imgData;
+                    hasCustomOverlay = true;
+                    await db.set('custom_face_image', imgData);
+                    renderHistory();
+                    showToast('過去の画像を復元しました');
+                });
+                container.appendChild(div);
+            });
+        }
+
+        async function addToHistory(dataUrl) {
+            if (faceHistory[0] === dataUrl) return; // 重複防止
+            faceHistory.unshift(dataUrl);
+            if (faceHistory.length > 5) faceHistory.pop();
+            await db.set('face_history', faceHistory);
+            renderHistory();
+        }
+
+        // Screen Wake Lock
+        let wakeLock = null;
+        async function requestWakeLock() {
+            try {
+                if ('wakeLock' in navigator) {
+                    wakeLock = await navigator.wakeLock.request('screen');
+                }
+            } catch (err) { console.error(`${err.name}, ${err.message}`); }
+        }
+        document.addEventListener('visibilitychange', () => {
+            if (wakeLock !== null && document.visibilityState === 'visible') requestWakeLock();
+        });
+
+        // Web Worker (Validation)
+        const workerBlob = new Blob([`
+            self.onmessage = function(e) {
+                const { type, data } = e.data;
+                if (type === 'validate_image') {
+                    // Simulate data validation & backup preparation async
+                    setTimeout(() => {
+                        self.postMessage({ type: 'image_validated', status: 'success', data: data });
+                    }, 100);
+                }
+            };
+        `], { type: 'application/javascript' });
+        const worker = new Worker(URL.createObjectURL(workerBlob));
+
+        // Toast Notification
+        function showToast(message, duration = 2000) {
+            const toast = document.getElementById('toast');
+            toast.textContent = message;
+            toast.classList.remove('opacity-0');
+            setTimeout(() => toast.classList.add('opacity-0'), duration);
+        }
+
+        // PWA Service Worker (Inline Simulation)
+        if ('serviceWorker' in navigator) {
+            const swCode = `
+                self.addEventListener('install', (e) => { self.skipWaiting(); });
+                self.addEventListener('activate', (e) => { e.waitUntil(clients.claim()); });
+                self.addEventListener('fetch', (e) => { /* Basic pass-through */ });
+            `;
+            const swBlob = new Blob([swCode], { type: 'application/javascript' });
+            navigator.serviceWorker.register(URL.createObjectURL(swBlob)).catch(err => console.error(err));
+        }
+
+        // --- 2. Application Logic (FaceMesh, Canvas, Processing) ---
+
+        const videoElement = document.getElementById('video-input');
+        const canvasElement = document.getElementById('output-canvas');
+        const canvasCtx = canvasElement.getContext('2d');
+        
+        let overlayImage = new Image();
+        let hasCustomOverlay = false;
+        
+        function createDefaultOverlay() {
+            const tempCanvas = document.createElement('canvas');
+            tempCanvas.width = 200; tempCanvas.height = 200;
+            const ctx = tempCanvas.getContext('2d');
+            ctx.beginPath();
+            ctx.arc(100, 100, 90, 0, Math.PI * 2, true);
+            ctx.fillStyle = '#facc15'; ctx.fill();
+            ctx.lineWidth = 5; ctx.strokeStyle = '#ca8a04'; ctx.stroke();
+            ctx.beginPath(); ctx.arc(65, 75, 15, 0, Math.PI * 2, true);
+            ctx.fillStyle = '#333'; ctx.fill();
+            ctx.beginPath(); ctx.arc(135, 75, 15, 0, Math.PI * 2, true);
+            ctx.fillStyle = '#333'; ctx.fill();
+            ctx.beginPath(); ctx.arc(100, 110, 50, 0.2 * Math.PI, 0.8 * Math.PI, false);
+            ctx.lineWidth = 10; ctx.strokeStyle = '#333'; ctx.stroke();
+            overlayImage.src = tempCanvas.toDataURL();
+            hasCustomOverlay = false;
+        }
+
+        async function loadSavedData() {
+            try {
+                const savedImage = await db.get('custom_face_image');
+                if (savedImage) {
+                    overlayImage.src = savedImage;
+                    hasCustomOverlay = true;
+                } else {
+                    createDefaultOverlay();
+                }
+            } catch (e) { createDefaultOverlay(); }
+        }
+
+        // Settings Modal Event Listeners
+        const settingsModal = document.getElementById('settings-modal');
+        document.getElementById('btn-settings').addEventListener('click', () => {
+            settingsModal.classList.remove('hidden');
+            settingsModal.classList.add('flex');
+            renderHistory();
+        });
+        document.getElementById('btn-close-settings').addEventListener('click', () => {
+            settingsModal.classList.add('hidden');
+            settingsModal.classList.remove('flex');
+        });
+
+        // Export / Import
+        document.getElementById('btn-export').addEventListener('click', () => {
+            try {
+                const exportData = { settings: appSettings, history: faceHistory, currentImage: hasCustomOverlay ? overlayImage.src : null };
+                const blob = new Blob([JSON.stringify(exportData)], { type: 'application/json' });
+                const url = URL.createObjectURL(blob);
+                const a = document.createElement('a');
+                a.href = url;
+                a.download = `liveface_ai_backup_${new Date().getTime()}.json`;
+                a.click();
+                URL.revokeObjectURL(url);
+                showToast('バックアップを保存しました');
+            } catch(e) { showToast('エクスポート失敗'); }
+        });
+
+        document.getElementById('import-file').addEventListener('change', (e) => {
+            const file = e.target.files[0];
+            if (!file) return;
+            const reader = new FileReader();
+            reader.onload = async (event) => {
+                try {
+                    const data = JSON.parse(event.target.result);
+                    if (data.settings) {
+                        appSettings = data.settings;
+                        await db.set('app_settings', appSettings);
+                        document.getElementById('setting-expression').checked = appSettings.expressionTracking;
+                        document.getElementById('setting-crop').checked = appSettings.autoCrop;
+                    }
+                    if (data.history && Array.isArray(data.history)) {
+                        faceHistory = data.history;
+                        await db.set('face_history', faceHistory);
+                    }
+                    if (data.currentImage) await applyNewFaceImage(data.currentImage, false);
+                    renderHistory();
+                    showToast('データを復元しました');
+                    e.target.value = '';
+                } catch(err) { showToast('ファイル形式が不正です'); }
+            };
+            reader.readAsText(file);
+        });
+
+        // Auto Crop Function using Static FaceMesh
+        let staticFaceMesh = null;
+        async function getStaticFaceMesh() {
+            if (!staticFaceMesh) {
+                staticFaceMesh = new FaceMesh({locateFile: (file) => `https://cdn.jsdelivr.net/npm/@mediapipe/face_mesh/${file}`});
+                staticFaceMesh.setOptions({ maxNumFaces: 1, refineLandmarks: false, minDetectionConfidence: 0.5, minTrackingConfidence: 0.5 });
+            }
+            return staticFaceMesh;
+        }
+
+        async function processAndCropFace(dataUrl) {
+            if (!appSettings.autoCrop) {
+                await applyNewFaceImage(dataUrl);
+                return;
+            }
+            showToast('AIで顔を自動抽出中...', 3000);
+            
+            const img = new Image();
+            img.crossOrigin = "anonymous";
+            await new Promise(r => { img.onload = r; img.src = dataUrl; });
+
+            const fm = await getStaticFaceMesh();
+            fm.onResults(async (results) => {
+                if (results.multiFaceLandmarks && results.multiFaceLandmarks.length > 0) {
+                    const landmarks = results.multiFaceLandmarks[0];
+                    const w = img.width, h = img.height;
+                    let minX = w, maxX = 0, minY = h, maxY = 0;
+                    landmarks.forEach(lm => {
+                        const x = lm.x * w, y = lm.y * h;
+                        if(x < minX) minX = x; if(x > maxX) maxX = x;
+                        if(y < minY) minY = y; if(y > maxY) maxY = y;
+                    });
+                    
+                    const padX = (maxX - minX) * 0.15;
+                    const padY = (maxY - minY) * 0.15;
+                    const cx = (minX + maxX) / 2;
+                    const cy = (minY + maxY) / 2;
+                    const radiusX = (maxX - minX) / 2 + padX;
+                    const radiusY = (maxY - minY) / 2 + padY;
+
+                    const tempCanvas = document.createElement('canvas');
+                    tempCanvas.width = radiusX * 2; tempCanvas.height = radiusY * 2;
+                    const tCtx = tempCanvas.getContext('2d');
+                    
+                    tCtx.beginPath();
+                    tCtx.ellipse(radiusX, radiusY, radiusX, radiusY, 0, 0, 2 * Math.PI);
+                    tCtx.clip();
+                    tCtx.drawImage(img, cx - radiusX, cy - radiusY, radiusX * 2, radiusY * 2, 0, 0, radiusX * 2, radiusY * 2);
+
+                    const croppedUrl = tempCanvas.toDataURL('image/png');
+                    await applyNewFaceImage(croppedUrl);
+                    showToast('顔の切り抜きに成功しました');
+                } else {
+                    showToast('顔検出失敗。元画像を使用します');
+                    await applyNewFaceImage(dataUrl);
+                }
+                fm.onResults(() => {}); // clear handler
+            });
+            await fm.send({image: img});
+        }
+
+        async function applyNewFaceImage(dataUrl, addToHist = true) {
+            overlayImage.src = dataUrl;
+            hasCustomOverlay = true;
+            await db.set('custom_face_image', dataUrl);
+            if (addToHist) await addToHistory(dataUrl);
+        }
+
+        // Image Upload
+        document.getElementById('image-upload').addEventListener('change', (e) => {
+            const file = e.target.files[0];
+            if (file) {
+                const reader = new FileReader();
+                reader.onload = (event) => worker.postMessage({ type: 'validate_image', data: event.target.result });
+                reader.readAsDataURL(file);
+            }
+        });
+
+        worker.onmessage = async (e) => {
+            if (e.data.type === 'image_validated' && e.data.status === 'success') {
+                await processAndCropFace(e.data.data);
+            }
+        };
+
+        // Reset
+        document.getElementById('btn-reset').addEventListener('click', async () => {
+            createDefaultOverlay();
+            await db.set('custom_face_image', null);
+            document.getElementById('image-upload').value = '';
+            showToast('顔画像をリセットしました');
+        });
+
+        // Setup Main FaceMesh (Tracking)
+        const faceMesh = new FaceMesh({locateFile: (file) => `https://cdn.jsdelivr.net/npm/@mediapipe/face_mesh/${file}`});
+        faceMesh.setOptions({ maxNumFaces: 3, refineLandmarks: true, minDetectionConfidence: 0.5, minTrackingConfidence: 0.5 });
+        faceMesh.onResults(onResults);
+
+        function onResults(results) {
+            const loadingOverlay = document.getElementById('loading-overlay');
+            if (loadingOverlay && !loadingOverlay.classList.contains('hidden')) {
+                loadingOverlay.classList.add('hidden');
+                const status = document.getElementById('status-indicator');
+                status.className = 'text-xs font-semibold px-2 py-1 rounded-full bg-green-500/20 text-green-400 border border-green-500/50';
+                status.innerHTML = '<i class="fa-solid fa-circle-check mr-1"></i> AI稼働中';
+            }
+
+            canvasElement.width = videoElement.videoWidth;
+            canvasElement.height = videoElement.videoHeight;
+            canvasCtx.save();
+            canvasCtx.clearRect(0, 0, canvasElement.width, canvasElement.height);
+            canvasCtx.drawImage(results.image, 0, 0, canvasElement.width, canvasElement.height);
+
+            if (results.multiFaceLandmarks) {
+                for (const landmarks of results.multiFaceLandmarks) drawOverlay(landmarks);
+            }
+            canvasCtx.restore();
+        }
+
+        function drawOverlay(landmarks) {
+            if (!overlayImage.complete || overlayImage.naturalWidth === 0) return;
+
+            const width = canvasElement.width;
+            const height = canvasElement.height;
+
+            const leftEye = landmarks[33], rightEye = landmarks[263], nose = landmarks[1];
+            const leftCheek = landmarks[234], rightCheek = landmarks[454], chin = landmarks[152], forehead = landmarks[10];
+
+            // 簡易表情追従 (Expression Tracking)
+            let scaleYModifier = 1.0;
+            let offsetYModifier = 0;
+
+            if (appSettings.expressionTracking) {
+                const upperLip = landmarks[13], lowerLip = landmarks[14];
+                const mouthDist = Math.sqrt(Math.pow((upperLip.x - lowerLip.x)*width, 2) + Math.pow((upperLip.y - lowerLip.y)*height, 2));
+                const faceH = Math.sqrt(Math.pow((chin.x - forehead.x)*width, 2) + Math.pow((chin.y - forehead.y)*height, 2));
+                const mouthOpenRatio = mouthDist / faceH;
+                
+                if (mouthOpenRatio > 0.03) {
+                    scaleYModifier = 1.0 + (mouthOpenRatio - 0.03) * 3.0; // 動的にY軸を伸ばす
+                    scaleYModifier = Math.min(1.35, scaleYModifier); // 上限
+                    offsetYModifier = (scaleYModifier - 1.0) * faceH * 0.15; // スケールに合わせて位置を微調整
+                }
+            }
+
+            const dx = (rightEye.x - leftEye.x) * width;
+            const dy = (rightEye.y - leftEye.y) * height;
+            const angle = Math.atan2(dy, dx);
+            const faceWidth = Math.sqrt(Math.pow((rightCheek.x - leftCheek.x)*width, 2) + Math.pow((rightCheek.y - leftCheek.y)*height, 2));
+            const faceHeight = Math.sqrt(Math.pow((chin.x - forehead.x)*width, 2) + Math.pow((chin.y - forehead.y)*height, 2));
+            const cx = nose.x * width, cy = nose.y * height;
+
+            canvasCtx.save();
+            canvasCtx.translate(cx, cy);
+            canvasCtx.rotate(angle);
+            canvasCtx.scale(1.0, scaleYModifier); // 表情の変形適用
+
+            const scale = 1.3;
+            let imgW, imgH;
+            
+            if (hasCustomOverlay) {
+                imgW = faceWidth * scale;
+                imgH = imgW * (overlayImage.naturalHeight / overlayImage.naturalWidth);
+            } else {
+                imgW = faceWidth * scale;
+                imgH = faceHeight * scale;
+            }
+
+            const offsetY = -imgH * 0.1 + offsetYModifier; 
+            canvasCtx.drawImage(overlayImage, -imgW / 2, -imgH / 2 + offsetY, imgW, imgH);
+            canvasCtx.restore();
+        }
+
+        const camera = new Camera(videoElement, {
+            onFrame: async () => { await faceMesh.send({image: videoElement}); },
+            width: 1280, height: 720, facingMode: "user"
+        });
+
+        // --- 3. Recording & Capture Features ---
+        let mediaRecorder; let recordedChunks = []; let isRecording = false; let recInterval; let recSeconds = 0;
+        const btnRecord = document.getElementById('btn-record'); const recordIcon = document.getElementById('record-icon');
+        const recordText = document.getElementById('record-text'); const recIndicator = document.getElementById('rec-indicator');
+        const recTimeLabel = document.getElementById('rec-time');
+
+        function formatTime(sec) {
+            return `${Math.floor(sec / 60).toString().padStart(2, '0')}:${(sec % 60).toString().padStart(2, '0')}`;
+        }
+
+        btnRecord.addEventListener('click', () => { isRecording ? stopRecording() : startRecording(); });
+
+        function startRecording() {
+            recordedChunks = [];
+            const stream = canvasElement.captureStream(30);
+            navigator.mediaDevices.getUserMedia({ audio: true, video: false })
+                .then(audioStream => initMediaRecorder(new MediaStream([...stream.getTracks(), ...audioStream.getTracks()])))
+                .catch(() => initMediaRecorder(stream));
+        }
+
+        function initMediaRecorder(stream) {
+            try { mediaRecorder = new MediaRecorder(stream, { mimeType: 'video/webm; codecs=vp9' }); } 
+            catch (e) { mediaRecorder = new MediaRecorder(stream); }
+
+            mediaRecorder.ondataavailable = (e) => { if (e.data.size > 0) recordedChunks.push(e.data); };
+            mediaRecorder.onstop = () => {
+                const blob = new Blob(recordedChunks, { type: 'video/mp4' });
+                const url = URL.createObjectURL(blob);
+                const a = document.createElement('a'); a.style.display = 'none'; a.href = url;
+                a.download = `LiveFace_AI_${new Date().getTime()}.mp4`;
+                document.body.appendChild(a); a.click();
+                setTimeout(() => { document.body.removeChild(a); window.URL.revokeObjectURL(url); }, 100);
+                showToast('動画を保存しました');
+            };
+
+            mediaRecorder.start(); isRecording = true;
+            btnRecord.classList.replace('from-red-500', 'from-gray-600'); btnRecord.classList.replace('to-red-600', 'to-gray-700');
+            recordIcon.classList.replace('fa-video', 'fa-stop'); recordText.textContent = "停止";
+            recordText.classList.replace('text-red-400', 'text-gray-400'); recIndicator.classList.remove('hidden');
+            
+            recSeconds = 0; recTimeLabel.textContent = formatTime(recSeconds);
+            recInterval = setInterval(() => { recSeconds++; recTimeLabel.textContent = formatTime(recSeconds); }, 1000);
+            showToast('録画開始');
+        }
+
+        function stopRecording() {
+            if (mediaRecorder && mediaRecorder.state !== 'inactive') mediaRecorder.stop();
+            if(mediaRecorder && mediaRecorder.stream) mediaRecorder.stream.getAudioTracks().forEach(track => track.stop());
+            isRecording = false; clearInterval(recInterval);
+            btnRecord.classList.replace('from-gray-600', 'from-red-500'); btnRecord.classList.replace('to-gray-700', 'to-red-600');
+            recordIcon.classList.replace('fa-stop', 'fa-video'); recordText.textContent = "録画";
+            recordText.classList.replace('text-gray-400', 'text-red-400'); recIndicator.classList.add('hidden');
+        }
+
+        document.getElementById('btn-capture').addEventListener('click', () => {
+            const a = document.createElement('a'); a.href = canvasElement.toDataURL('image/jpeg', 0.9);
+            a.download = `LiveFace_AI_Photo_${new Date().getTime()}.jpg`; a.click();
+            
+            const flash = document.createElement('div');
+            flash.className = 'absolute inset-0 bg-white z-50 transition-opacity duration-300 pointer-events-none';
+            document.getElementById('main-view').appendChild(flash);
+            setTimeout(() => flash.style.opacity = '0', 50); setTimeout(() => flash.remove(), 350);
+            showToast('写真を保存しました');
+        });
+
+        document.getElementById('btn-share').addEventListener('click', async () => {
+            if (navigator.share) {
+                try {
+                    const blob = await new Promise(r => canvasElement.toBlob(r, 'image/jpeg', 0.9));
+                    const file = new File([blob], 'liveface_ai.jpg', { type: 'image/jpeg' });
+                    if (navigator.canShare && navigator.canShare({ files: [file] })) {
+                        await navigator.share({ title: 'LiveFace AI', text: 'LiveFace AIで作った映像を見て！', files: [file] });
+                    } else {
+                        await navigator.share({ title: 'LiveFace AI', text: 'LiveFace AIで顔変換中！', url: window.location.href });
+                    }
+                } catch (e) { if(e.name !== 'AbortError') showToast('共有に失敗しました'); }
+            } else { showToast('ブラウザが共有未対応です'); }
+        });
+
+        // --- Bootstrap Application ---
+        async function bootstrap() {
+            await db.init();
+            await loadSettingsAndHistory();
+            await loadSavedData();
+            requestWakeLock();
+            camera.start();
+        }
+
+        document.addEventListener('DOMContentLoaded', bootstrap);
+    </script>
+</body>
+</html>
